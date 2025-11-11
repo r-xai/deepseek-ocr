@@ -1,4 +1,14 @@
-import os, io, glob
+import os
+
+# Disable all torch compile paths for GB10 Blackwell GPU (CUDA 12.1) compatibility
+# Avoids Triton/ptxas errors with sm_121a architecture
+# MUST be set before importing vLLM
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+os.environ["FLASH_ATTENTION_FORCE_SDPA"] = "1"  # Force SDPA path, not Triton FA
+os.environ["VLLM_GPU_MEMORY_UTILIZATION"] = "0.90"
+
+import io, glob
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 import fitz  # PyMuPDF
@@ -10,6 +20,7 @@ MODEL_ID = "deepseek-ai/DeepSeek-OCR"
 # Optimized for DGX Spark (GB10, 6144 CUDA cores, 128GB unified memory)
 llm = LLM(
     model=MODEL_ID,
+    enforce_eager=True,  # Skip torch.compile/inductor - critical for GB10
     gpu_memory_utilization=0.9,  # Use 90% of GPU memory
     max_model_len=4096,  # Increase context for large images
     enable_prefix_caching=False,  # Per DeepSeek-OCR docs

@@ -126,8 +126,78 @@ All previously identified issues have been fixed:
 
 5. ✅ **Better progress tracking** - Added file counters and per-page progress indicators
 
+## GB10 Blackwell GPU Compatibility (IMPORTANT)
+
+### Issue: vLLM Incompatibility with SM 12.1
+
+The original vLLM-based scripts (`batch_ocr.py`, `batch_tables.py`) **do not work** on GB10 Blackwell GPU due to Triton kernel compilation errors:
+
+```
+ptxas fatal: Value 'sm_121a' is not defined for option 'gpu-name'
+```
+
+**Root cause**: The bundled `ptxas` in current vLLM versions doesn't support CUDA compute capability 12.1 (sm_121a).
+
+**Attempted fixes that failed**:
+- Setting `VLLM_TORCH_COMPILE_LEVEL=0`, `TORCHDYNAMO_DISABLE=1`, `TORCH_COMPILE_DISABLE=1`
+- Using `enforce_eager=True` in vLLM initialization
+- Disabling Flash Attention with `FLASH_ATTENTION_FORCE_SDPA=1`
+
+All attempts failed because vLLM uses Triton kernels internally regardless of these settings.
+
+### Solution: Use Transformers Library
+
+**Working script**: [run_deepseek_transformers.py](run_deepseek_transformers.py)
+
+This script uses PyTorch Transformers instead of vLLM, avoiding all Triton compilation:
+
+```python
+from transformers import AutoProcessor, AutoModelForCausalLM
+
+# Load model (IMPORTANT: use AutoProcessor, NOT AutoTokenizer)
+processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    trust_remote_code=True,
+    torch_dtype=torch.bfloat16
+).to(DEVICE).eval()
+
+# Run inference
+inputs = processor(text=prompt, images=img.convert("RGB"), return_tensors="pt").to(DEVICE)
+with torch.no_grad():
+    out = model.generate(**inputs, max_new_tokens=2048)
+text = processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+```
+
+**Key API requirements**:
+- Must use `AutoProcessor` (handles both text and images)
+- Must use `AutoModelForCausalLM` (not AutoModel)
+- Call pattern: `processor(text=..., images=..., return_tensors="pt")`
+- Decode with: `processor.batch_decode(out, skip_special_tokens=True)[0]`
+
+### Docker Container Requirements
+
+GB10 requires recent NVIDIA PyTorch containers. Tested working versions:
+- `nvcr.io/nvidia/pytorch:24.12-py3` ✅
+- `nvcr.io/nvidia/pytorch:25.01-py3` ✅
+- `nvcr.io/nvidia/pytorch:25.02-py3` ✅
+
+Older containers (24.10 and earlier) fail with: "Detected NVIDIA GB10 GPU, which is not yet supported"
+
+**Usage**:
+```bash
+# Automated approach
+./run_docker.sh
+
+# Or test container compatibility first
+./test_container.sh
+```
+
+See [QUICKSTART.md](QUICKSTART.md) and [README_TRANSFORMERS.md](README_TRANSFORMERS.md) for detailed instructions.
+
 ## Potential Future Enhancements
 
 - **Resolution configuration**: Expose DeepSeek-OCR's resolution tier settings (tiny/small/base/large/gundam) as command-line arguments
-- **Batch inference**: Explore vLLM batch processing for multiple images simultaneously (may improve GPU utilization)
+- **Batch inference**: Explore Transformers batch processing for multiple images simultaneously (may improve GPU utilization)
 - **Adaptive DPI**: Auto-adjust PDF rendering DPI based on source document quality
+- **vLLM migration**: When vLLM releases SM 12.1 support, consider migrating back for maximum performance
