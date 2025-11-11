@@ -152,11 +152,11 @@ All attempts failed because vLLM uses Triton kernels internally regardless of th
 This script uses PyTorch Transformers instead of vLLM, avoiding all Triton compilation:
 
 ```python
-from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModel
 
-# Load model (IMPORTANT: use AutoProcessor, NOT AutoTokenizer)
+# Load model (IMPORTANT: use AutoProcessor + AutoModel with trust_remote_code)
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
+model = AutoModel.from_pretrained(
     MODEL_ID,
     trust_remote_code=True,
     torch_dtype=torch.bfloat16
@@ -171,7 +171,7 @@ text = processor.batch_decode(out, skip_special_tokens=True)[0].strip()
 
 **Key API requirements**:
 - Must use `AutoProcessor` (handles both text and images)
-- Must use `AutoModelForCausalLM` (not AutoModel)
+- Must use `AutoModel` with `trust_remote_code=True` (NOT AutoModelForCausalLM - DeepSeek-OCR uses custom model classes)
 - Call pattern: `processor(text=..., images=..., return_tensors="pt")`
 - Decode with: `processor.batch_decode(out, skip_special_tokens=True)[0]`
 
