@@ -11,7 +11,7 @@ echo ""
 # Start with 24.12, fall back to 25.01 if needed
 PYTORCH_IMAGE="nvcr.io/nvidia/pytorch:24.12-py3"
 
-docker run --gpus=all -it --rm \
+docker run --gpus=all --rm \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -v ~/Documents/deepseek-ocr:/workspace \
   -v ~/hf-cache:/root/.cache/huggingface \

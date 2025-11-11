@@ -11,7 +11,7 @@ Requires:
     pip install transformers==4.46.3 tokenizers==0.20.3 einops addict easydict accelerate pillow pymupdf
 """
 
-import os, io, sys
+import os, io, sys, tempfile
 from PIL import Image
 import fitz  # PyMuPDF
 import torch
@@ -37,13 +37,31 @@ PROMPT_MD = (
 )
 
 def infer_on_image(img: Image.Image, csv_preference=True, max_new_tokens=2048):
-    """Run OCR inference on a single image."""
+    """Run OCR inference on a single image using model's infer() method."""
     prompt = PROMPT_CSV if csv_preference else PROMPT_MD
-    inputs = processor(text=prompt, images=img.convert("RGB"), return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    text = processor.batch_decode(out, skip_special_tokens=True)[0].strip()
-    return text
+
+    # Save image to temp file (model.infer expects file path)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.convert("RGB").save(tmp.name, "PNG")
+        tmp_path = tmp.name
+
+    try:
+        # Use model's native infer() method
+        result = model.infer(
+            tokenizer=processor.tokenizer,
+            prompt=prompt,
+            image_file=tmp_path,
+            output_path="",  # Don't save intermediate files
+            base_size=1024,
+            image_size=640,
+            crop_mode=True,
+            save_results=False
+        )
+        return result.strip() if isinstance(result, str) else str(result).strip()
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 def write_output(stem: str, page_idx: int, text: str, prefer_csv: bool):
     """Write OCR output to file, auto-detecting CSV vs Markdown."""
