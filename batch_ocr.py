@@ -1,99 +1,137 @@
 import os
 
-# Disable all torch compile paths for GB10 Blackwell GPU (CUDA 12.1) compatibility
-# Avoids Triton/ptxas errors with sm_121a architecture
-# MUST be set before importing vLLM
+# Disable torch.compile to avoid Triton/PTX paths unsupported on GB10 (SM 12.1)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
-os.environ["FLASH_ATTENTION_FORCE_SDPA"] = "1"  # Force SDPA path, not Triton FA
-os.environ["VLLM_GPU_MEMORY_UTILIZATION"] = "0.90"
 
-import io, glob
+import glob
+import io
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from PIL import Image
+from typing import Iterator, Tuple
+
 import fitz  # PyMuPDF
-from vllm import LLM, SamplingParams
+import torch
+from PIL import Image
+from transformers import AutoModel, AutoProcessor
 
 MODEL_ID = "deepseek-ai/DeepSeek-OCR"
+PROMPT = "Convert the document to markdown."
+PDF_DPI = 250
+PDF_RENDER_WORKERS = min(10, (os.cpu_count() or 2))
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Start the model once; vLLM handles GPU execution efficiently
-# Optimized for DGX Spark (GB10, 6144 CUDA cores, 128GB unified memory)
-llm = LLM(
-    model=MODEL_ID,
-    enforce_eager=True,  # Skip torch.compile/inductor - critical for GB10
-    gpu_memory_utilization=0.9,  # Use 90% of GPU memory
-    max_model_len=4096,  # Increase context for large images
-    enable_prefix_caching=False,  # Per DeepSeek-OCR docs
-    tensor_parallel_size=1,  # Single GPU
-)
-sampler = SamplingParams(max_tokens=2048, temperature=0)
-
-IN_DIR  = "in"
+IN_DIR = "in"
 OUT_DIR = "out"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-def ocr_image(pil_img):
-    # vLLM multimodal: pass image with prompt following DeepSeek-OCR format
-    out = llm.generate(
-        {"prompt": "Convert the document to markdown.", "images": [pil_img.convert("RGB")]},
-        sampler
-    )
-    return out[0].outputs[0].text
+_processor = None
+_model = None
 
-def ocr_pdf(path):
-    doc = fitz.open(path)
-    images = []
 
-    # First pass: render all pages to images in parallel (CPU-bound, uses DGX Spark's 20 cores)
-    print(f"  Rendering {len(doc)} pages...")
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        def render_page(page_info):
-            i, page = page_info
-            pix = page.get_pixmap(dpi=250, alpha=False)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            return (i, img)
+def load_model() -> Tuple[AutoProcessor, AutoModel]:
+    """Load the DeepSeek-OCR processor + model lazily."""
+    global _processor, _model
+    if _processor is None or _model is None:
+        print(f"Loading DeepSeek-OCR ({MODEL_ID}) on {DEVICE}...")
+        _processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+        dtype = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+        _model = (
+            AutoModel.from_pretrained(
+                MODEL_ID,
+                trust_remote_code=True,
+                torch_dtype=dtype,
+            )
+            .to(DEVICE)
+            .eval()
+        )
+        print("Model ready.")
+    return _processor, _model
 
-        images = list(executor.map(render_page, enumerate(doc)))
 
-    # Second pass: batch OCR processing for GPU efficiency
-    print(f"  Running OCR on {len(images)} pages...")
-    texts = []
-    for i, img in images:
-        txt = ocr_image(img)
-        texts.append(f"## Page {i+1}\n\n{txt}\n")
-        print(f"    Page {i+1}/{len(images)} complete")
+def pdf_pages(path: str, dpi: int = PDF_DPI) -> Iterator[Tuple[int, Image.Image]]:
+    """Yield (page_index, PIL.Image) for each PDF page with limited memory use."""
+    with fitz.open(path) as doc:
+        def render(page_info):
+            idx, page = page_info
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            with Image.open(io.BytesIO(pix.tobytes("png"))) as pil_img:
+                return idx, pil_img.convert("RGB")
 
-    return "\n".join(texts)
+        with ThreadPoolExecutor(max_workers=PDF_RENDER_WORKERS) as executor:
+            for idx, img in executor.map(render, enumerate(doc)):
+                yield idx, img
 
-def ocr_path(path):
+
+def ocr_image(pil_img: Image.Image) -> str:
+    """Run OCR on a single image and return markdown text."""
+    processor, model = load_model()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_img = os.path.join(tmpdir, "page.png")
+        pil_img.convert("RGB").save(tmp_img, "PNG")
+
+        result = model.infer(
+            tokenizer=processor,
+            prompt=PROMPT,
+            image_file=tmp_img,
+            output_path=tmpdir,
+            base_size=1024,
+            image_size=640,
+            crop_mode=True,
+            save_results=False,
+        )
+
+    return result.strip() if isinstance(result, str) else str(result).strip()
+
+
+def ocr_pdf(path: str) -> str:
+    """Process each PDF page sequentially and stitch markdown output."""
+    sections = []
+    for idx, img in pdf_pages(path):
+        print(f"    Page {idx + 1}...")
+        try:
+            text = ocr_image(img)
+        finally:
+            img.close()
+        sections.append(f"## Page {idx + 1}\n\n{text}\n")
+    return "\n".join(sections)
+
+
+def ocr_path(path: str) -> None:
     base = os.path.basename(path)
     stem, _ = os.path.splitext(base)
     out_md = os.path.join(OUT_DIR, f"{stem}.md")
+
     if path.lower().endswith(".pdf"):
         text = ocr_pdf(path)
     else:
-        img = Image.open(path)
-        text = ocr_image(img)
+        with Image.open(path) as img:
+            text = ocr_image(img)
+
     with open(out_md, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"Wrote {out_md}")
 
+
 def main():
-    exts = ("*.pdf","*.png","*.jpg","*.jpeg","*.tif","*.tiff")
+    exts = ("*.pdf", "*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff")
     files = []
-    for e in exts:
-        files.extend(glob.glob(os.path.join(IN_DIR, e)))
+    for pattern in exts:
+        files.extend(glob.glob(os.path.join(IN_DIR, pattern)))
     if not files:
         print("No input files found in ./in")
         return
 
     print(f"Found {len(files)} files to process")
-    for idx, p in enumerate(sorted(files), 1):
+    for idx, path in enumerate(sorted(files), 1):
+        print(f"[{idx}/{len(files)}] Processing {os.path.basename(path)}...")
         try:
-            print(f"[{idx}/{len(files)}] Processing {os.path.basename(p)}...")
-            ocr_path(p)
-        except Exception as e:
-            print(f"[WARN] Failed on {p}: {e}")
+            ocr_path(path)
+        except Exception as exc:
+            print(f"[WARN] Failed on {path}: {exc}")
+
 
 if __name__ == "__main__":
     main()

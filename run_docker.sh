@@ -8,8 +8,8 @@ echo "========================================"
 echo ""
 
 # Try newer PyTorch containers that support GB10 GPU
-# Start with 24.12, fall back to 25.01 if needed
-PYTORCH_IMAGE="nvcr.io/nvidia/pytorch:24.12-py3"
+# 25.09 has native GB10/Blackwell support
+PYTORCH_IMAGE="nvcr.io/nvidia/pytorch:25.09-py3"
 
 docker run --gpus=all --rm \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -38,7 +38,7 @@ EOF
     echo ""
     echo "Installing dependencies..."
     python3 -m pip install --upgrade pip -q
-    pip install -q "transformers==4.46.3" "tokenizers==0.20.3" einops addict easydict accelerate pillow pymupdf
+    pip install -q "transformers==4.46.3" "tokenizers==0.20.3" einops addict easydict accelerate pillow pymupdf python-slugify
 
     echo ""
     echo "Dependencies installed successfully!"
@@ -56,5 +56,5 @@ EOF
 
     echo ""
     echo "========================================"
-    echo "Processing complete! Check out/ directory for results."
+    echo "Processing complete! Check out/<document-name>/trimmed/ for best results."
 '
